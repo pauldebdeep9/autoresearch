@@ -2,6 +2,12 @@
 Autoresearch pretraining script. Single-GPU, single-file.
 Cherry-picked and simplified from nanochat.
 Usage: uv run train.py
+
+Fork note:
+This file stays close to Andrej's upstream shape on purpose. The main
+fork-specific integration point is the optional `AUTORESEARCH_SUMMARY_PATH`
+sidecar near the end of the file, which lets MemoryLab log runs using a stable
+machine-readable summary instead of scraping only terminal output.
 """
 
 import os
@@ -9,6 +15,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
+import json
 import time
 from dataclasses import dataclass, asdict
 
@@ -22,6 +29,9 @@ cap = torch.cuda.get_device_capability()
 repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
 fa3 = get_kernel(repo).flash_attn_interface
 
+# `prepare.py` is intentionally treated as stable infrastructure. The agent
+# experiments in this repo are centered on editing this file, while these
+# imported helpers define the fixed runtime surface around the experiments.
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
 
 # ---------------------------------------------------------------------------
@@ -466,6 +476,7 @@ vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
 
 def build_model_config(depth):
+    """Derive a head-dimension-aligned GPT configuration from a chosen depth."""
     base_dim = depth * ASPECT_RATIO
     model_dim = ((base_dim + HEAD_DIM - 1) // HEAD_DIM) * HEAD_DIM
     num_heads = model_dim // HEAD_DIM
@@ -515,6 +526,7 @@ print(f"Gradient accumulation steps: {grad_accum_steps}")
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
 def get_lr_multiplier(progress):
+    """Warmup/steady/warmdown schedule expressed over wall-clock progress."""
     if progress < WARMUP_RATIO:
         return progress / WARMUP_RATIO if WARMUP_RATIO > 0 else 1.0
     elif progress < 1.0 - WARMDOWN_RATIO:
@@ -524,10 +536,12 @@ def get_lr_multiplier(progress):
         return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
 
 def get_muon_momentum(step):
+    """Ramp Muon momentum during the early optimization phase."""
     frac = min(step / 300, 1)
     return (1 - frac) * 0.85 + frac * 0.95
 
 def get_weight_decay(progress):
+    """Decay cautious weight decay over the fixed 5-minute run window."""
     return WEIGHT_DECAY * (1 - progress)
 
 # ---------------------------------------------------------------------------
@@ -612,6 +626,9 @@ with autocast_ctx:
     val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
 
 # Final summary
+# This console block remains human-readable for the original workflow.
+# Immediately below, the optional JSON sidecar mirrors the same data in a
+# stable machine-readable format for MemoryLab's ledger/provenance pipeline.
 t_end = time.time()
 startup_time = t_start_training - t_start
 steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
@@ -627,3 +644,24 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+summary_path = os.environ.get("AUTORESEARCH_SUMMARY_PATH")
+if summary_path:
+    summary = {
+        "val_bpb": round(val_bpb, 6),
+        "training_seconds": round(total_training_time, 1),
+        "total_seconds": round(t_end - t_start, 1),
+        "peak_vram_mb": round(peak_vram_mb, 1),
+        "mfu_percent": round(steady_state_mfu, 2),
+        "total_tokens_M": round(total_tokens / 1e6, 1),
+        "num_steps": step,
+        "num_params_M": round(num_params / 1e6, 1),
+        "depth": DEPTH,
+    }
+    summary_file = os.path.abspath(summary_path)
+    summary_dir = os.path.dirname(summary_file)
+    if summary_dir:
+        os.makedirs(summary_dir, exist_ok=True)
+    with open(summary_file, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
+        handle.write("\n")

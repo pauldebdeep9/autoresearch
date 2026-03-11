@@ -7,6 +7,13 @@ Usage:
     python prepare.py --num-shards 8   # download only 8 shards (for testing)
 
 Data and tokenizer are stored in ~/.cache/autoresearch/.
+
+Fork note:
+This file is intentionally treated as stable infrastructure. The agent-facing
+research loop in upstream autoresearch centers on modifying `train.py`, and
+this fork preserves that boundary. MemoryLab builds on top of the resulting run
+artifacts, but it does not change the fixed data-prep and evaluation semantics
+defined here.
 """
 
 import os
@@ -246,6 +253,7 @@ class Tokenizer:
 
 
 def get_token_bytes(device="cpu"):
+    """Load the token-byte lookup used by the fixed BPB evaluation metric."""
     path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
     with open(path, "rb") as f:
         return torch.load(f, map_location=device)
@@ -278,6 +286,10 @@ def make_dataloader(tokenizer, B, T, split, buffer_size=1000):
     Every row starts with BOS. Documents packed using best-fit to minimize cropping.
     When no document fits remaining space, crops shortest doc to fill exactly.
     100% utilization (no padding).
+
+    This function is part of the fixed training surface imported by `train.py`.
+    Keeping it here, rather than in an external framework layer, is one of the
+    reasons the repo stays small and easy for agents to reason about.
     """
     assert split in ["train", "val"]
     row_capacity = T + 1

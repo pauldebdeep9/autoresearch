@@ -13,7 +13,8 @@ To set up a new experiment, work with the user to:
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+5. **Initialize MemoryLab**: Run `python memorylab.py init`. This creates the structured ledger, champion/challenger registry, report directory, and `results.tsv`.
+6. **Know the fork surface**: If you need the operator-layer schema or command reference, read `docs/memorylab_api.md`.
 6. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -63,9 +64,21 @@ grep "^val_bpb:" run.log
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+When an experiment is done, log it through MemoryLab. It will append to both the structured ledger and `results.tsv`, then generate a decision packet with a recommended next action.
 
-The TSV has a header row and 5 columns:
+Use:
+
+```bash
+python memorylab.py log \
+  --description "increase LR to 0.04" \
+  --tags "optimizer,lr" \
+  --status keep \
+  --summary results/memorylab/latest_summary.json \
+  --log run.log \
+  --report
+```
+
+The compatibility TSV still has a header row and 5 columns:
 
 ```
 commit	val_bpb	memory_gb	status	description
@@ -94,14 +107,17 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autorese
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+2. Choose an idea and run the history-aware novelty guard: `python memorylab.py check --description "<idea>" --mode explore|exploit|replicate --family "<experiment-family>" --tags "<comma-separated tags>"`
+3. Tune `train.py` with that idea by directly hacking the code.
+4. git commit
+5. Run the experiment with a structured summary sidecar: `AUTORESEARCH_SUMMARY_PATH=results/memorylab/latest_summary.json uv run train.py > run.log 2>&1`
+6. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
+8. Record the result with `python memorylab.py log --description "<idea>" --tags "<tags>" --status keep|discard|crash --summary results/memorylab/latest_summary.json --log run.log --report`
+9. Read the generated decision packet or morning report and use the recommended next action (`promote`, `branch_followup`, `replicate`, `retry`, `abandon`, `fix_and_retry`) to choose your next move.
+10. Do not commit `results.tsv` or anything under `results/`
+11. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
+12. If val_bpb is equal or worse, you git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
